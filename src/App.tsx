@@ -1,72 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
-
-type Severity = 'critical' | 'warning' | 'watch'
-
-type FloodAlert = {
-  id: number
-  title: string
-  address: string
-  severity: Severity
-  depth: number
-  updated: string
-  lat: number
-  lng: number
-  path: { lat: number; lng: number }[]
-}
-
-const alerts: FloodAlert[] = [
-  {
-    id: 1,
-    title: 'Ngập sâu, không thể lưu thông',
-    address: 'Đường Nguyễn Hữu Cảnh, Bình Thạnh',
-    severity: 'critical',
-    depth: 48,
-    updated: '2 phút trước',
-    lat: 10.7909,
-    lng: 106.7202,
-    path: [
-      { lat: 10.7888, lng: 106.7181 },
-      { lat: 10.7902, lng: 106.7192 },
-      { lat: 10.7928, lng: 106.7216 },
-    ],
-  },
-  {
-    id: 2,
-    title: 'Nước đang dâng nhanh',
-    address: 'Ung Văn Khiêm, Bình Thạnh',
-    severity: 'warning',
-    depth: 31,
-    updated: '5 phút trước',
-    lat: 10.806,
-    lng: 106.715,
-    path: [
-      { lat: 10.8032, lng: 106.713 },
-      { lat: 10.806, lng: 106.715 },
-      { lat: 10.8085, lng: 106.717 },
-    ],
-  },
-  {
-    id: 3,
-    title: 'Ngập nhẹ, di chuyển chậm',
-    address: 'Xô Viết Nghệ Tĩnh, Bình Thạnh',
-    severity: 'watch',
-    depth: 16,
-    updated: '8 phút trước',
-    lat: 10.7986,
-    lng: 106.709,
-    path: [
-      { lat: 10.7968, lng: 106.707 },
-      { lat: 10.7986, lng: 106.709 },
-      { lat: 10.8002, lng: 106.711 },
-    ],
-  },
-]
-
-const severityMeta = {
-  critical: { label: 'Nguy hiểm', color: '#e3382f' },
-  warning: { label: 'Cảnh báo', color: '#f18b2b' },
-  watch: { label: 'Theo dõi', color: '#f3bd35' },
-}
+import { useCallback, useMemo, useState } from 'react'
+import { alerts, severityMeta } from './features/alerts/alert-data'
+import type { FloodAlert, Severity } from './features/alerts/alert-data'
+import FloodMap from './features/map/FloodMap'
 
 function Icon({
   name,
@@ -95,101 +30,6 @@ function Icon({
     edit: <><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z" /></>,
   }
   return <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>
-}
-
-function FallbackMap() {
-  return (
-    <div className="fallback-map" aria-label="Bản đồ mô phỏng khu vực Bình Thạnh">
-      <svg viewBox="0 0 430 720" preserveAspectRatio="xMidYMid slice">
-        <rect width="430" height="720" fill="#dfe8e1" />
-        <path d="M-20 90 450 420M-30 480 390 90M55-20 380 730M-10 320 450 570M170-20 30 740M250-20 445 240" stroke="#f9faf6" strokeWidth="18" />
-        <path d="M-20 90 450 420M-30 480 390 90M55-20 380 730M-10 320 450 570M170-20 30 740M250-20 445 240" stroke="#c9d2cb" strokeWidth="1.5" />
-        <path d="M355-20c-60 120 45 190-22 290s42 170 6 265 22 160 4 205" fill="none" stroke="#aacfd3" strokeWidth="46" />
-        <g fill="#cad7c9" opacity=".75">
-          <path d="m50 115 82 55-34 70-88-61Z" /><path d="m205 80 100 66-32 55-104-63Z" />
-          <path d="m65 390 84 50-42 96-83-55Z" /><path d="m230 480 72 49-38 89-84-53Z" />
-        </g>
-        <path d="M106 463c26-31 51-58 76-84 22-23 51-56 70-83" stroke="#e3382f" strokeWidth="12" strokeLinecap="round" />
-        <path d="M246 230c-12 31-18 66-20 103" stroke="#f18b2b" strokeWidth="11" strokeLinecap="round" />
-        <path d="M137 255c18 13 41 32 60 54" stroke="#f3bd35" strokeWidth="10" strokeLinecap="round" />
-        <g fontFamily="Arial, sans-serif" fontSize="10" fill="#78837c">
-          <text x="38" y="290">Đ. Điện Biên Phủ</text><text x="231" y="455">Nguyễn Hữu Cảnh</text>
-          <text x="50" y="600">QUẬN 1</text><text x="176" y="180">BÌNH THẠNH</text>
-        </g>
-      </svg>
-    </div>
-  )
-}
-
-function GoogleMap({ activeId }: { activeId: number | null }) {
-  const mapNode = useRef<HTMLDivElement>(null)
-  const mapRef = useRef<any>(null)
-  const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY
-
-  useEffect(() => {
-    if (!apiKey || !mapNode.current) return
-
-    const setupMap = () => {
-      if (!mapNode.current || mapRef.current) return
-      const google = (window as any).google
-      const map = new google.maps.Map(mapNode.current, {
-        center: { lat: 10.797, lng: 106.714 },
-        zoom: 14,
-        disableDefaultUI: true,
-        gestureHandling: 'greedy',
-        mapId: 'flood-watch-map',
-        styles: [
-          { featureType: 'poi', elementType: 'labels', stylers: [{ visibility: 'off' }] },
-          { featureType: 'transit', elementType: 'labels', stylers: [{ visibility: 'off' }] },
-        ],
-      })
-      alerts.forEach((alert) => {
-        const color = severityMeta[alert.severity].color
-        new google.maps.Polyline({ path: alert.path, map, strokeColor: '#ffffff', strokeOpacity: 0.9, strokeWeight: 13 })
-        new google.maps.Polyline({ path: alert.path, map, strokeColor: color, strokeOpacity: 1, strokeWeight: 9 })
-        new google.maps.Circle({
-          center: { lat: alert.lat, lng: alert.lng },
-          radius: 190,
-          map,
-          fillColor: color,
-          fillOpacity: 0.13,
-          strokeColor: color,
-          strokeOpacity: 0.35,
-          strokeWeight: 1,
-        })
-      })
-      mapRef.current = map
-    }
-
-    if ((window as any).google?.maps) {
-      setupMap()
-      return
-    }
-    const existing = document.querySelector<HTMLScriptElement>('script[data-google-maps]')
-    if (existing) {
-      existing.addEventListener('load', setupMap)
-      return () => existing.removeEventListener('load', setupMap)
-    }
-    const script = document.createElement('script')
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&v=weekly`
-    script.async = true
-    script.dataset.googleMaps = 'true'
-    script.addEventListener('load', setupMap)
-    document.head.appendChild(script)
-    return () => script.removeEventListener('load', setupMap)
-  }, [apiKey])
-
-  useEffect(() => {
-    if (!activeId || !mapRef.current) return
-    const alert = alerts.find((item) => item.id === activeId)
-    if (alert) {
-      mapRef.current.panTo({ lat: alert.lat, lng: alert.lng })
-      mapRef.current.setZoom(16)
-    }
-  }, [activeId])
-
-  if (!apiKey) return <FallbackMap />
-  return <div ref={mapNode} className="google-map" aria-label="Bản đồ cảnh báo ngập trực tiếp" />
 }
 
 type Tab = 'map' | 'alerts' | 'route' | 'profile'
@@ -228,7 +68,14 @@ export default function App() {
   const [location, setLocation] = useState('Đang xác định vị trí...')
   const [routeReady, setRouteReady] = useState(false)
 
-  const visibleAlerts = alerts.filter((alert) => activeFilter === 'all' || alert.severity === activeFilter)
+  const visibleAlerts = useMemo(
+    () => alerts.filter((alert) => activeFilter === 'all' || alert.severity === activeFilter),
+    [activeFilter],
+  )
+  const selectAlert = useCallback((alert: FloodAlert) => {
+    setSelectedAlert(alert)
+    setPanelOpen(true)
+  }, [])
 
   const locate = () => {
     setLocation('Đang lấy GPS...')
@@ -258,7 +105,11 @@ export default function App() {
   return (
     <main className="app-shell">
       <section className="phone-frame">
-        <GoogleMap activeId={selectedAlert?.id ?? null} />
+        <FloodMap
+          alerts={visibleAlerts}
+          selectedAlertId={selectedAlert?.id ?? null}
+          onSelectAlert={selectAlert}
+        />
         <div className="map-shade" />
 
         {tab === 'map' && <>
@@ -271,13 +122,6 @@ export default function App() {
           <div className="map-tools">
             <button aria-label="Về vị trí của tôi" onClick={locate}><Icon name="location" /></button>
             <button aria-label="Chọn lớp bản đồ"><Icon name="layers" /></button>
-          </div>
-          <div className="alert-markers">
-            {visibleAlerts.map((alert, index) => (
-              <button key={alert.id} className={`flood-marker marker-${index + 1} ${selectedAlert?.id === alert.id ? 'active' : ''}`} style={{ '--marker-color': severityMeta[alert.severity].color } as React.CSSProperties} onClick={() => { setSelectedAlert(alert); setPanelOpen(true) }}>
-                <Icon name="alert" size={18} /><b>{alert.depth}cm</b>
-              </button>
-            ))}
           </div>
           <section className={`bottom-panel ${panelOpen ? '' : 'collapsed'}`}>
             <button className="panel-handle" onClick={() => setPanelOpen((value) => !value)} aria-label="Thu gọn bảng cảnh báo"><span /></button>

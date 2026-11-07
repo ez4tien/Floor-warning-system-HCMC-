@@ -131,27 +131,33 @@
 .map-tools { position: absolute; z-index: 3; right: 18px; top: 151px; display: grid; gap: 9px; }
 .map-tools button { width: 41px; height: 41px; border-radius: 12px; }
 
-.flood-marker {
-  --marker-color: #e3382f;
-  position: absolute;
-  z-index: 2;
-  padding: 7px 10px;
-  display: flex;
-  gap: 4px;
-  align-items: center;
-  border: 3px solid white;
-  border-radius: 20px 20px 20px 5px;
-  color: white;
-  background: var(--marker-color);
-  box-shadow: 0 7px 18px rgba(30,35,32,.24);
-  font-size: 11px;
-  transform: scale(.92);
-  transition: transform .2s;
+.flood-route-underlay, .flood-route-line, .flood-route-flow {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
 }
-.flood-marker.active { transform: scale(1.08); }
-.marker-1 { top: 31%; left: 37%; }
-.marker-2 { top: 22%; right: 20%; }
-.marker-3 { top: 37%; left: 17%; }
+.flood-route-underlay { stroke: rgba(255,255,255,.92); stroke-width: 15; }
+.flood-route-line { stroke-width: 9; }
+.flood-route-flow {
+  stroke: rgba(255,255,255,.68);
+  stroke-width: 2;
+  stroke-dasharray: 2 20;
+  animation: flood-flow 1.8s linear infinite;
+}
+.fallback-alert.selected .flood-route-line { stroke-width: 11; }
+.fallback-alert-marker { cursor: pointer; outline: none; }
+.fallback-alert-marker text {
+  fill: #fff;
+  font: 700 9px 'Be Vietnam Pro', sans-serif;
+  pointer-events: none;
+}
+.fallback-alert-marker:focus-visible circle,
+.fallback-alert-marker:hover circle { stroke: #18342a; stroke-width: 4; }
+@keyframes flood-flow { to { stroke-dashoffset: -44; } }
+@media (prefers-reduced-motion: reduce) {
+  .flood-route-flow { animation: none; }
+}
 
 .bottom-panel {
   position: absolute;
