@@ -1,8 +1,11 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { alerts, severityMeta } from './features/alerts/alert-data'
 import type { FloodAlert, Severity } from './features/alerts/alert-data'
 import AccountPage from './features/account/AccountPage'
 import FloodMap from './features/map/FloodMap'
+import { searchPlaces, type PlaceSuggestion } from './features/map/place-search'
+import { findSafeRoute } from './features/map/route-planner'
+import type { RouteEndpoint, SafeRoutePlan } from './features/map/route-planner'
 
 function Icon({
   name,
@@ -34,6 +37,7 @@ function Icon({
 }
 
 type Tab = 'map' | 'alerts' | 'route' | 'profile'
+type RouteFieldName = 'origin' | 'destination'
 
 function AlertCard({ alert, selected, onClick }: { alert: FloodAlert; selected?: boolean; onClick?: () => void }) {
   return (
@@ -58,6 +62,41 @@ function PageHeader({ title, subtitle }: { title: string; subtitle: string }) {
   )
 }
 
+function formatRouteDuration(seconds: number) {
+  const minutes = Math.ceil(seconds / 60)
+  const hours = Math.floor(minutes / 60)
+  return hours > 0 ? `${hours} giờ ${minutes % 60} phút` : `${minutes} phút`
+}
+
+function RouteResult({ plan, onSelectAlert }: { plan: SafeRoutePlan; onSelectAlert: (alert: FloodAlert) => void }) {
+  const routeStatus = plan.noSafeAlternative
+    ? 'Không tìm được tuyến tránh hoàn toàn'
+    : plan.hazards.length > 0
+      ? 'Tuyến này vẫn đi gần điểm ngập'
+      : plan.isDetour
+        ? `Đã vòng tránh ${plan.avoidedCount} điểm ngập`
+        : 'Không phát hiện điểm ngập gần tuyến'
+
+  return (
+    <section className="route-result" aria-live="polite">
+      <div className={`route-result-summary ${plan.noSafeAlternative ? 'has-warning' : ''}`}>
+        <span><Icon name={plan.noSafeAlternative ? 'alert' : 'shield'} size={20} /></span>
+        <div><strong>{routeStatus}</strong><small>{plan.distanceMeters / 1000 < 10 ? (plan.distanceMeters / 1000).toFixed(1) : Math.round(plan.distanceMeters / 1000)} km · {formatRouteDuration(plan.durationSeconds)}</small></div>
+        <b>{plan.hazards.length}</b>
+      </div>
+      <div className="route-alert-heading"><strong>Cảnh báo cần lưu ý</strong><span>{plan.hazards.length} điểm gần tuyến</span></div>
+      {plan.hazards.length > 0 ? <div className="route-alert-list">{plan.hazards.map((alert) => (
+        <button key={alert.id} className="route-alert-item" onClick={() => onSelectAlert(alert)}>
+          <span className="route-alert-depth" style={{ background: severityMeta[alert.severity].color }}>{alert.depth}<small>cm</small></span>
+          <span className="route-alert-copy"><strong>{alert.address}</strong><small>{severityMeta[alert.severity].label} · {alert.updated}</small></span>
+          <Icon name="chevron" size={18} />
+        </button>
+      ))}</div> : <p className="route-no-hazards"><Icon name="check" size={16} /> Không có điểm ngập trong bán kính 180 m quanh lộ trình.</p>}
+      {plan.noSafeAlternative && <p className="route-result-note"><Icon name="alert" size={16} /> Đã thử tuyến vòng thay thế nhưng vẫn còn điểm ngập gần đường. Hãy xem các điểm cảnh báo và cân nhắc đổi hành trình.</p>}
+    </section>
+  )
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>('map')
   const [activeFilter, setActiveFilter] = useState<'all' | Severity>('all')
@@ -67,7 +106,17 @@ export default function App() {
   const [reportSent, setReportSent] = useState(false)
   const [photo, setPhoto] = useState<string | null>(null)
   const [location, setLocation] = useState('Đang xác định vị trí...')
-  const [routeReady, setRouteReady] = useState(false)
+  const [routeOrigin, setRouteOrigin] = useState<RouteEndpoint>({ label: 'Vị trí của bạn', location: null })
+  const [routeDestination, setRouteDestination] = useState<RouteEndpoint>({ label: '', location: null })
+  const [avoidFloodedRoads, setAvoidFloodedRoads] = useState(true)
+  const [routePlan, setRoutePlan] = useState<SafeRoutePlan | null>(null)
+  const [routeLoading, setRouteLoading] = useState(false)
+  const [routeError, setRouteError] = useState<string | null>(null)
+  const [gpsStatus, setGpsStatus] = useState('')
+  const [gpsLoading, setGpsLoading] = useState(false)
+  const [activeRouteField, setActiveRouteField] = useState<RouteFieldName | null>(null)
+  const [originSuggestions, setOriginSuggestions] = useState<PlaceSuggestion[]>([])
+  const [destinationSuggestions, setDestinationSuggestions] = useState<PlaceSuggestion[]>([])
 
   const visibleAlerts = useMemo(
     () => alerts.filter((alert) => activeFilter === 'all' || alert.severity === activeFilter),
@@ -77,6 +126,86 @@ export default function App() {
     setSelectedAlert(alert)
     setPanelOpen(true)
   }, [])
+
+  const focusRouteField = (field: RouteFieldName) => {
+    setActiveRouteField(field)
+  }
+
+  const locateRouteOrigin = useCallback(() => {
+    setRouteError(null)
+    setRoutePlan(null)
+    setActiveRouteField(null)
+    setOriginSuggestions([])
+    setGpsLoading(true)
+    setGpsStatus('Đang xác định vị trí GPS...')
+    let completed = false
+    const finishWithFallback = (message: string) => {
+      if (completed) return
+      completed = true
+      window.clearTimeout(fallbackTimer)
+      setRouteOrigin({ label: 'Vị trí của bạn', location: { lat: 10.8014, lng: 106.7148 } })
+      setGpsStatus(message)
+      setGpsLoading(false)
+    }
+    const fallbackTimer = window.setTimeout(
+      () => finishWithFallback('Không lấy được GPS sau 3 giây. Đang dùng vị trí mặc định tại Bình Thạnh.'),
+      3000,
+    )
+
+    if (!navigator.geolocation) {
+      finishWithFallback('Thiết bị không hỗ trợ GPS. Đang dùng vị trí mặc định tại Bình Thạnh.')
+      return
+    }
+
+    try {
+      navigator.geolocation.getCurrentPosition(
+        ({ coords }) => {
+          if (completed) return
+          completed = true
+          window.clearTimeout(fallbackTimer)
+          setRouteOrigin({
+            label: 'Vị trí của bạn',
+            location: { lat: coords.latitude, lng: coords.longitude },
+          })
+          setGpsStatus('Điểm đi đang dùng vị trí GPS hiện tại.')
+          setGpsLoading(false)
+        },
+        () => finishWithFallback('Không lấy được GPS. Đang dùng vị trí mặc định tại Bình Thạnh.'),
+        { enableHighAccuracy: true, timeout: 3000, maximumAge: 30000 },
+      )
+    } catch {
+      finishWithFallback('Không thể truy cập GPS. Đang dùng vị trí mặc định tại Bình Thạnh.')
+    }
+  }, [])
+
+  useEffect(() => {
+    if (tab !== 'route' || !activeRouteField) return
+
+    const endpoint = activeRouteField === 'origin' ? routeOrigin : routeDestination
+    const setSuggestions = activeRouteField === 'origin' ? setOriginSuggestions : setDestinationSuggestions
+    if (endpoint.location || endpoint.label.trim().length < 2) {
+      setSuggestions((current) => current.length === 0 ? current : [])
+      return
+    }
+
+    const controller = new AbortController()
+    const timeout = window.setTimeout(async () => {
+      try {
+        const suggestions = await searchPlaces(endpoint.label, controller.signal)
+        if (!controller.signal.aborted) setSuggestions(suggestions)
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === 'AbortError')) {
+          setSuggestions([])
+          setRouteError(error instanceof Error ? error.message : 'Không thể tải gợi ý địa điểm.')
+        }
+      }
+    }, 250)
+
+    return () => {
+      window.clearTimeout(timeout)
+      controller.abort()
+    }
+  }, [activeRouteField, routeDestination, routeOrigin, tab])
 
   const locate = () => {
     setLocation('Đang lấy GPS...')
@@ -89,6 +218,48 @@ export default function App() {
       () => setLocation('Nguyễn Hữu Cảnh, Bình Thạnh'),
       { enableHighAccuracy: true, timeout: 7000 },
     )
+  }
+
+  const searchRoute = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setRouteError(null)
+    if (!routeOrigin.label.trim() || !routeDestination.label.trim()) {
+      setRouteError('Hãy nhập cả điểm đi và điểm đến.')
+      return
+    }
+    setRouteLoading(true)
+    setRoutePlan(null)
+    try {
+      const plan = await findSafeRoute(routeOrigin, routeDestination, alerts, avoidFloodedRoads)
+      setRoutePlan(plan)
+      setSelectedAlert(null)
+      setPanelOpen(false)
+      setTab('map')
+    } catch (error) {
+      setRouteError(error instanceof Error ? error.message : 'Không thể tìm lộ trình. Hãy kiểm tra địa chỉ và thử lại.')
+    } finally {
+      setRouteLoading(false)
+    }
+  }
+
+  const openRouteTab = () => {
+    setTab('route')
+    if (!gpsLoading && !routeOrigin.location && routeOrigin.label === 'Vị trí của bạn') locateRouteOrigin()
+  }
+
+  const chooseRouteSuggestion = (field: RouteFieldName, prediction: PlaceSuggestion) => {
+    setActiveRouteField(null)
+    setRouteError(null)
+    setRoutePlan(null)
+    if (field === 'origin') setOriginSuggestions([])
+    else setDestinationSuggestions([])
+
+    if (field === 'origin') {
+      setRouteOrigin({ label: prediction.label, location: prediction.location })
+      setGpsStatus('')
+    } else {
+      setRouteDestination({ label: prediction.label, location: prediction.location })
+    }
   }
 
   const submitReport = () => {
@@ -110,6 +281,7 @@ export default function App() {
           alerts={visibleAlerts}
           selectedAlertId={selectedAlert?.id ?? null}
           onSelectAlert={selectAlert}
+          route={routePlan}
         />
         <div className="map-shade" />
 
@@ -136,6 +308,19 @@ export default function App() {
             </div>
             <div className="alert-list">{visibleAlerts.map((alert) => <AlertCard key={alert.id} alert={alert} selected={selectedAlert?.id === alert.id} onClick={() => setSelectedAlert(alert)} />)}</div>
           </section>
+          {routePlan && !panelOpen && <section className="map-route-card" aria-live="polite">
+            <header><div><small>LỘ TRÌNH ĐÃ TÍNH</small><strong>{(routePlan.distanceMeters / 1000).toFixed(1)} km · {formatRouteDuration(routePlan.durationSeconds)}</strong></div><button onClick={() => { setRoutePlan(null); setPanelOpen(true) }} aria-label="Đóng lộ trình"><Icon name="close" size={18} /></button></header>
+            <p className={routePlan.noSafeAlternative ? 'route-card-warning' : ''}>
+              {routePlan.noSafeAlternative
+                ? `Chưa tìm được đường tránh hết ${routePlan.hazards.length} điểm ngập.`
+                : routePlan.hazards.length
+                  ? `${routePlan.hazards.length} điểm ngập gần tuyến, xem và cân nhắc trước khi đi.`
+                  : routePlan.isDetour
+                    ? `Đã tìm đường vòng, tránh ${routePlan.avoidedCount} điểm ngập.`
+                    : 'Không phát hiện điểm ngập gần tuyến.'}
+            </p>
+            <button className="map-route-details" onClick={() => setTab('route')}>Quay lại màn hình Lộ trình <Icon name="chevron" size={16} /></button>
+          </section>}
         </>}
 
         {tab === 'alerts' && <section className="app-page">
@@ -147,18 +332,82 @@ export default function App() {
         </section>}
 
         {tab === 'route' && <section className="app-page route-page">
-          <PageHeader title="Tìm đường an toàn" subtitle="Tự động tránh tuyến đang ngập" />
-          <div className="route-inputs">
-            <span className="route-dots"><i /><i /><i /></span>
-            <label><small>Điểm bắt đầu</small><input defaultValue="Vị trí của bạn" /></label>
-            <label><small>Điểm đến</small><input placeholder="Bạn muốn đi đâu?" /></label>
-          </div>
-          <button className="primary-button" onClick={() => setRouteReady(true)}><Icon name="route" size={19} /> Tìm lộ trình an toàn</button>
-          {routeReady ? <div className="route-result">
-            <div className="route-visual"><span className="route-path" /><i className="start-dot" /><i className="end-dot" /><span className="blocked-road">Đường ngập</span></div>
-            <div className="route-choice"><div><span>Khuyến nghị · tránh 3 điểm ngập</span><strong>26 phút <small>· 8,4 km</small></strong></div><button>Bắt đầu</button></div>
-            <p><Icon name="shield" size={17} /> Lộ trình ưu tiên đường cao, không đi qua vùng ngập đã xác nhận.</p>
-          </div> : <div className="route-empty"><span><Icon name="route" size={32} /></span><h2>Đi an toàn hơn khi trời mưa</h2><p>Nhập điểm đến, ứng dụng sẽ đối chiếu tất cả cảnh báo để đề xuất đường tránh.</p></div>}
+          <PageHeader title="Tìm đường an toàn" subtitle="TỰ ĐỘNG TRÁNH TUYẾN ĐANG NGẬP" />
+          <form className="route-form" onSubmit={searchRoute}>
+            <div className="route-inputs">
+              <span className="route-dots"><i /><i /><i /></span>
+              <div className="route-field">
+                <div className="route-field-heading"><label htmlFor="route-origin">Điểm bắt đầu</label><button type="button" onClick={locateRouteOrigin} disabled={gpsLoading || routeLoading}>Dùng GPS</button></div>
+                <input
+                  id="route-origin"
+                  value={routeOrigin.label}
+                  onFocus={() => focusRouteField('origin')}
+                  onBlur={() => setActiveRouteField((field) => field === 'origin' ? null : field)}
+                  onChange={(event) => {
+                    setRouteOrigin({ label: event.target.value, location: null })
+                    setRoutePlan(null)
+                    setRouteError(null)
+                    setGpsStatus('')
+                  }}
+                  placeholder="Vị trí GPS hoặc địa chỉ"
+                  spellCheck={false}
+                  autoComplete="off"
+                  aria-autocomplete="list"
+                  aria-controls="route-origin-suggestions"
+                  aria-expanded={activeRouteField === 'origin' && originSuggestions.length > 0}
+                  required
+                  disabled={routeLoading || gpsLoading}
+                />
+                {activeRouteField === 'origin' && originSuggestions.length > 0 && <div id="route-origin-suggestions" className="route-suggestions" role="listbox">
+                  {originSuggestions.map((prediction) => (
+                    <button key={prediction.placeId} type="button" role="option" className="route-suggestion" onPointerDown={(event) => event.preventDefault()} onClick={() => void chooseRouteSuggestion('origin', prediction)}>
+                      <strong>{prediction.label}</strong>
+                    </button>
+                  ))}
+                </div>}
+              </div>
+              <div className="route-field">
+                <div className="route-field-heading"><label htmlFor="route-destination">ĐIỂM ĐẾN</label></div>
+                <input
+                  id="route-destination"
+                  value={routeDestination.label}
+                  onFocus={() => focusRouteField('destination')}
+                  onBlur={() => setActiveRouteField((field) => field === 'destination' ? null : field)}
+                  onChange={(event) => {
+                    setRouteDestination({ label: event.target.value, location: null })
+                    setRoutePlan(null)
+                    setRouteError(null)
+                  }}
+                  placeholder="Nhập địa chỉ hoặc tên đường"
+                  spellCheck={false}
+                  autoComplete="off"
+                  aria-autocomplete="list"
+                  aria-controls="route-destination-suggestions"
+                  aria-expanded={activeRouteField === 'destination' && destinationSuggestions.length > 0}
+                  required
+                  disabled={routeLoading}
+                />
+                {activeRouteField === 'destination' && destinationSuggestions.length > 0 && <div id="route-destination-suggestions" className="route-suggestions" role="listbox">
+                  {destinationSuggestions.map((prediction) => (
+                    <button key={prediction.placeId} type="button" role="option" className="route-suggestion" onPointerDown={(event) => event.preventDefault()} onClick={() => void chooseRouteSuggestion('destination', prediction)}>
+                      <strong>{prediction.label}</strong>
+                    </button>
+                  ))}
+                </div>}
+              </div>
+            </div>
+            <div className="route-preference">
+              <div><strong>Tránh tuyến có cảnh báo</strong><small>{avoidFloodedRoads ? 'Luôn tránh điểm ngập nguy hiểm' : 'Đường ngắn nhất, vẫn hiện cảnh báo'}</small></div>
+              <button type="button" className={`route-switch ${avoidFloodedRoads ? 'on' : ''}`} role="switch" aria-checked={avoidFloodedRoads} aria-label="Tránh các tuyến có cảnh báo ngập" disabled={routeLoading} onClick={() => { setAvoidFloodedRoads((value) => !value); setRoutePlan(null) }}><span /></button>
+            </div>
+            {gpsStatus && <p className="route-form-hint">{gpsStatus}</p>}
+            {routeError && <p className="route-form-error" role="alert">{routeError}</p>}
+            <p className="route-form-hint route-attribution">Địa điểm: © OpenStreetMap contributors · Định tuyến: OSRM</p>
+            <button className="primary-button" type="submit" disabled={routeLoading || gpsLoading}><Icon name={routeLoading || gpsLoading ? 'location' : 'route'} size={19} /> {routeLoading ? 'Đang tìm đường...' : gpsLoading ? 'Đang xác định vị trí...' : 'Tra cứu cảnh báo ngập'}</button>
+          </form>
+          {routeLoading ? <div className="route-empty route-loading"><span><Icon name="route" size={32} /></span><h2>Đang tính lộ trình</h2><p>Đang so sánh tuyến đường với các điểm ngập hiện có.</p></div>
+            : routePlan ? <RouteResult plan={routePlan} onSelectAlert={goToAlert} />
+              : <div className="route-empty"><span><Icon name="route" size={32} /></span><h2>Đi an toàn hơn khi trời mưa</h2><p>Chọn điểm đi và đến. Ứng dụng sẽ tính lộ trình, đánh dấu điểm ngập gần đường và tìm phương án vòng tránh.</p></div>}
         </section>}
 
         {tab === 'profile' && <AccountPage />}
@@ -167,7 +416,7 @@ export default function App() {
           <button className={tab === 'map' ? 'active' : ''} onClick={() => setTab('map')}><Icon name="home" /><span>Bản đồ</span></button>
           <button className={tab === 'alerts' ? 'active' : ''} onClick={() => setTab('alerts')}><Icon name="alert" /><span>Cảnh báo</span></button>
           <button className="report-button" onClick={() => { setReportOpen(true); locate() }}><span><Icon name="camera" size={23} /></span>Báo ngập</button>
-          <button className={tab === 'route' ? 'active' : ''} onClick={() => setTab('route')}><Icon name="route" /><span>Lộ trình</span></button>
+          <button className={tab === 'route' ? 'active' : ''} onClick={openRouteTab}><Icon name="route" /><span>Lộ trình</span></button>
           <button className={tab === 'profile' ? 'active' : ''} onClick={() => setTab('profile')}><Icon name="user" /><span>Cá nhân</span></button>
         </nav>
 
